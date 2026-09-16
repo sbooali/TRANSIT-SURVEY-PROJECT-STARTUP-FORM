@@ -10,8 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import HTTPException
-
 from lib.db import execute, fetch_all, fetch_one
 from lib.serializers import json_array, row_to_named, row_to_snapshot
 from lib.storage import presigned_url, stored_name_from_path, upload_bytes
@@ -24,9 +22,10 @@ class ServiceError(RuntimeError):
 
 
 def _unwrap(exc: Exception) -> ServiceError:
-    if isinstance(exc, HTTPException):
-        return ServiceError(str(exc.detail))
-    return ServiceError(str(exc))
+    if isinstance(exc, ServiceError):
+        return exc
+    detail = getattr(exc, "detail", None)
+    return ServiceError(str(detail if detail not in (None, "") else exc))
 
 
 def health() -> dict:

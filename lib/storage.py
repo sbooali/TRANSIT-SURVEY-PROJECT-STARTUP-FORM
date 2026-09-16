@@ -4,7 +4,6 @@ from urllib.parse import quote, unquote
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import HTTPException
 
 S3_CLIENT_CONFIG = Config(
     signature_version="s3v4",
@@ -16,9 +15,8 @@ _bucket_region = None
 def _required(name: str) -> str:
     value = (os.getenv(name) or "").strip()
     if not value:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Missing {name} in .env. Add S3_BUCKET, AWS_REGION, and AWS credentials.",
+        raise RuntimeError(
+            f"Missing {name} in .env or Streamlit secrets. Add S3_BUCKET, AWS_REGION, and AWS credentials."
         )
     return value
 
@@ -69,7 +67,7 @@ def resolve_bucket_region(cfg: dict) -> str:
         if header_region:
             _bucket_region = _normalize_region(header_region)
             return _bucket_region
-        raise HTTPException(status_code=502, detail=f"Could not determine S3 bucket region: {exc}") from exc
+        raise RuntimeError(f"Could not determine S3 bucket region: {exc}") from exc
 
 
 def s3_client():
@@ -99,13 +97,12 @@ def upload_bytes(stored_filename: str, content: bytes, content_type: str | None)
     except ClientError as exc:
         code = (exc.response.get("Error") or {}).get("Code") or ""
         if code in {"NoSuchBucket", "404"}:
-            raise HTTPException(
-                status_code=502,
-                detail=f"S3 bucket {cfg['bucket']!r} does not exist. Create it in AWS or set S3_BUCKET to an existing bucket.",
+            raise RuntimeError(
+                f"S3 bucket {cfg['bucket']!r} does not exist. Create it in AWS or set S3_BUCKET to an existing bucket."
             ) from exc
-        raise HTTPException(status_code=502, detail=f"S3 upload failed: {exc}") from exc
+        raise RuntimeError(f"S3 upload failed: {exc}") from exc
     except BotoCoreError as exc:
-        raise HTTPException(status_code=502, detail=f"S3 upload failed: {exc}") from exc
+        raise RuntimeError(f"S3 upload failed: {exc}") from exc
     return {
         "key": key,
         "path": s3_uri(key, cfg["bucket"]),
@@ -138,4 +135,4 @@ def presigned_url(stored_filename: str, download_name: str | None = None) -> str
             ExpiresIn=3600,
         )
     except (BotoCoreError, ClientError) as exc:
-        raise HTTPException(status_code=502, detail=f"Could not create S3 download link: {exc}") from exc
+        raise RuntimeError(f"Could not create S3 download link: {exc}") from exc
