@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/.venv/
+
+# Secrets and local files
+.env
+keys/*.p8
+keys/*.pem
+uploads/*
+
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
