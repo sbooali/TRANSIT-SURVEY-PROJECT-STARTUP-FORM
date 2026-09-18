@@ -496,7 +496,15 @@ def language_pills(label: str, key: str, options: list[str], selected: list[str]
     return [name for name in (picked or []) if name in options]
 
 
-def add_language_controls(input_key: str, button_key: str, disabled: bool, *, placeholder: str = "Missing language name") -> bool:
+def add_language_controls(
+    input_key: str,
+    button_key: str,
+    disabled: bool,
+    *,
+    placeholder: str = "Missing language name",
+    on_click=None,
+    args: tuple = (),
+) -> None:
     with st.container():
         st.markdown('<div class="add-lang-row save-color-btn"></div>', unsafe_allow_html=True)
         field, action = st.columns([4.5, 1.2], gap="small", vertical_alignment="center", wrap=False)
@@ -509,7 +517,15 @@ def add_language_controls(input_key: str, button_key: str, disabled: bool, *, pl
                 label_visibility="collapsed",
             )
         with action:
-            return st.button("Add", type="primary", key=button_key, disabled=disabled, width="stretch")
+            st.button(
+                "Add",
+                type="primary",
+                key=button_key,
+                disabled=disabled,
+                width="stretch",
+                on_click=on_click,
+                args=args,
+            )
 
 
 def language_matrix(kit: str, callback_key: str, translation_key: str, languages: list[dict], disabled: bool) -> None:
@@ -524,19 +540,13 @@ def language_matrix(kit: str, callback_key: str, translation_key: str, languages
     nonce = st.session_state.lang_nonce
     form[callback_key] = language_pills("Call-back", f"pills_cb_{kit}_{nonce}", names, current_cb, disabled)
     form[translation_key] = language_pills("Full translation", f"pills_tr_{kit}_{nonce}", names, current_tr, disabled)
-    if add_language_controls(f"new_lang_{kit}", f"btn_lang_{kit}", disabled):
-        try:
-            created = find_or_create_language(st.session_state.get(f"new_lang_{kit}") or "")
-            label = lang_name(created)
-            reload_lists()
-            if label:
-                form[callback_key] = list(dict.fromkeys(list(form.get(callback_key) or []) + [label]))
-            st.session_state.lang_nonce += 1
-            st.session_state.toast = f"Added {label}."
-            st.session_state[f"new_lang_{kit}"] = ""
-        except Exception as exc:
-            st.session_state.error = str(exc)
-        st.rerun()
+    add_language_controls(
+        f"new_lang_{kit}",
+        f"btn_lang_{kit}",
+        disabled,
+        on_click=add_od_language,
+        args=(kit, callback_key),
+    )
 
 
 def od_kit(prefix: str, enabled_key: str, languages: list[dict], disabled: bool) -> None:
@@ -814,6 +824,55 @@ def render_banners() -> None:
             st.rerun()
 
 
+def add_named_from_admin(kind: str, title: str) -> None:
+    name = (st.session_state.get(f"admin_new_{kind}") or "").strip()
+    st.session_state.error = ""
+    try:
+        if kind == "users":
+            find_or_create_user(name)
+        elif kind == "projects":
+            create_project(name)
+        else:
+            find_or_create_language(name)
+        reload_lists()
+        st.session_state[f"admin_new_{kind}"] = ""
+        st.session_state.notice = f"Added to {title.lower()}."
+    except Exception as exc:
+        st.session_state.error = str(exc)
+
+
+def add_od_language(kit: str, callback_key: str) -> None:
+    form = st.session_state.form
+    st.session_state.error = ""
+    try:
+        created = find_or_create_language(st.session_state.get(f"new_lang_{kit}") or "")
+        label = lang_name(created)
+        reload_lists()
+        if label:
+            form[callback_key] = list(dict.fromkeys(list(form.get(callback_key) or []) + [label]))
+        st.session_state.lang_nonce += 1
+        st.session_state.toast = f"Added {label}."
+        st.session_state[f"new_lang_{kit}"] = ""
+    except Exception as exc:
+        st.session_state.error = str(exc)
+
+
+def add_sas_language() -> None:
+    st.session_state.error = ""
+    try:
+        created = find_or_create_language(st.session_state.get("new_lang_sas") or "")
+        reload_lists()
+        label = lang_name(created)
+        if label:
+            current = list(st.session_state.form.get("sas_translation_languages") or [])
+            st.session_state.form["sas_translation_languages"] = list(dict.fromkeys(current + [label]))
+        st.session_state.lang_nonce += 1
+        st.session_state.new_lang_sas = ""
+        st.session_state.toast = f"Added {label}."
+    except Exception as exc:
+        st.session_state.error = str(exc)
+
+
 def named_admin(title: str, kind: str, items: list[dict], name_key: str) -> None:
     st.markdown(f"### {title}")
     st.caption("Add names used in the form dropdowns. Deactivate to hide them without changing old saves.")
@@ -822,21 +881,7 @@ def named_admin(title: str, kind: str, items: list[dict], name_key: str) -> None
         st.text_input(f"New {title[:-1].lower()} name", key=f"admin_new_{kind}")
     with btn_col:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        if st.button("Add", key=f"admin_add_{kind}"):
-            try:
-                name = (st.session_state.get(f"admin_new_{kind}") or "").strip()
-                if kind == "users":
-                    find_or_create_user(name)
-                elif kind == "projects":
-                    create_project(name)
-                else:
-                    find_or_create_language(name)
-                reload_lists()
-                st.session_state[f"admin_new_{kind}"] = ""
-                st.session_state.notice = f"Added to {title.lower()}."
-            except Exception as exc:
-                st.session_state.error = str(exc)
-            st.rerun()
+        st.button("Add", key=f"admin_add_{kind}", on_click=add_named_from_admin, args=(kind, title))
     for item in items:
         label = item.get(name_key) or item.get("name") or item.get("display_name")
         status = "Active" if item.get("is_active") else "Inactive"
@@ -1196,20 +1241,7 @@ def render_form() -> None:
             )
             st.session_state.sas_langs = picked
             st.session_state.form["sas_translation_languages"] = picked
-            if add_language_controls("new_lang_sas", "btn_lang_sas", read_only):
-                try:
-                    created = find_or_create_language(st.session_state.get("new_lang_sas") or "")
-                    reload_lists()
-                    label = lang_name(created)
-                    if label:
-                        current = list(st.session_state.form.get("sas_translation_languages") or [])
-                        st.session_state.form["sas_translation_languages"] = list(dict.fromkeys(current + [label]))
-                    st.session_state.lang_nonce += 1
-                    st.session_state.new_lang_sas = ""
-                    st.session_state.toast = f"Added {label}."
-                except Exception as exc:
-                    st.session_state.error = str(exc)
-                st.rerun()
+            add_language_controls("new_lang_sas", "btn_lang_sas", read_only, on_click=add_sas_language)
 
     with st.container():
         st.markdown("<div class='card-start'></div>", unsafe_allow_html=True)
