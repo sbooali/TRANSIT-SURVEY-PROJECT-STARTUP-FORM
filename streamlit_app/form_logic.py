@@ -9,6 +9,7 @@ from typing import Any
 def empty_form() -> dict:
     return {
         "project_name": "",
+        "project_list_name": "",
         "client_name": "",
         "location_city_county": "",
         "location_state": "",
@@ -91,7 +92,7 @@ def person_name(choice: str, other: str, users: list[dict]) -> str:
     match = next((user for user in users if user.get("id") == choice), None)
     if match:
         return match.get("display_name") or match.get("name") or ""
-    return ""
+    return (choice or other or "").strip()
 
 
 def form_fill_percent(*, actor_name: str, project_id: str, form: dict, manager_name: str, supervisor_name: str) -> int:
@@ -164,7 +165,7 @@ def format_yes_no(value: Any) -> str:
         return "Yes"
     if value is False:
         return "No"
-    return "—"
+    return "Unset"
 
 
 def format_when(value: Any) -> str:
@@ -199,6 +200,7 @@ def _display_value(value) -> str:
 
 
 DIFF_FIELDS = [
+    ("project_list_name", "Project list"),
     ("project_name", "Project name"),
     ("client_name", "Client"),
     ("location_city_county", "City / county"),
@@ -252,6 +254,8 @@ def format_project_brief(*, project_title, actor_name, manager_name, supervisor_
         last_saved_label or "Not saved yet",
         "",
         line("Filled out by", actor_name),
+        line("Project list", form.get("project_list_name") or project_title),
+        line("Project name", form.get("project_name") or project_title),
         line("Client", form.get("client_name")),
         line(
             "Location",

@@ -33,7 +33,26 @@ def health() -> dict:
     return {"ok": True, "snowflake": True, "version": row["version"] if row else None}
 
 
+_schema_ready = False
+
+
+def ensure_snapshot_schema() -> None:
+    global _schema_ready
+    if _schema_ready:
+        return
+    execute("ALTER TABLE PROJECT_SNAPSHOTS ADD COLUMN IF NOT EXISTS PROJECT_LIST_NAME VARCHAR(500)")
+    _schema_ready = True
+
+
+def project_list_name(project_id: str) -> str:
+    if not project_id:
+        return ""
+    row = fetch_one("SELECT NAME FROM PROJECTS WHERE ID = %s", (project_id,))
+    return ((row or {}).get("name") or "").strip()
+
+
 def bootstrap() -> dict:
+    ensure_snapshot_schema()
     return {
         "ok": True,
         "users": [row_to_named(row) for row in fetch_all(f"SELECT {USER_COLUMNS} FROM USERS ORDER BY DISPLAY_NAME")],
@@ -100,13 +119,30 @@ def find_or_create_user(name: str) -> dict:
 
 
 def create_project(name: str) -> dict:
+    project, _existed = find_or_create_project(name)
+    return project
+
+
+def find_or_create_project(name: str) -> tuple[dict, bool]:
     trimmed = (name or "").strip()
     if not trimmed:
         raise ServiceError("Project name is required.")
+    existing = fetch_one(
+        "SELECT ID, NAME, IS_ACTIVE, CREATED_AT FROM PROJECTS WHERE LOWER(NAME) = LOWER(%s)",
+        (trimmed,),
+    )
+    if existing:
+        if not existing.get("is_active"):
+            execute("UPDATE PROJECTS SET IS_ACTIVE = TRUE WHERE ID = %s", (existing["id"],))
+            existing = fetch_one(
+                "SELECT ID, NAME, IS_ACTIVE, CREATED_AT FROM PROJECTS WHERE ID = %s",
+                (existing["id"],),
+            )
+        return row_to_named(existing, "name"), True
     item_id = str(uuid.uuid4())
     execute("INSERT INTO PROJECTS (ID, NAME, IS_ACTIVE) VALUES (%s, %s, TRUE)", (item_id, trimmed))
     row = fetch_one("SELECT ID, NAME, IS_ACTIVE, CREATED_AT FROM PROJECTS WHERE ID = %s", (item_id,))
-    return row_to_named(row, "name")
+    return row_to_named(row, "name"), False
 
 
 def find_or_create_language(name: str) -> dict:
@@ -262,12 +298,17 @@ def save_snapshot(project_id: str, body: dict) -> dict:
     if not saved_by_name:
         raise ServiceError("saved_by_name is required")
 
+    ensure_snapshot_schema()
+    list_name = (body.get("project_list_name") or "").strip() or project_list_name(project_id)
+    setup_name = (body.get("project_name") or "").strip() or list_name
+    body = {**body, "project_list_name": list_name or None, "project_name": setup_name or None}
+
     snapshot_id = str(uuid.uuid4())
     execute(
         """
         INSERT INTO PROJECT_SNAPSHOTS (
             ID, PROJECT_ID, SAVED_BY_USER_ID, SAVED_BY_NAME,
-            PROJECT_NAME, CLIENT_NAME, LOCATION_CITY_COUNTY, LOCATION_STATE,
+            PROJECT_NAME, PROJECT_LIST_NAME, CLIENT_NAME, LOCATION_CITY_COUNTY, LOCATION_STATE,
             FIELD_START_DATE, PROJECT_MANAGER_NAME, FIELD_SUPERVISOR_NAME,
             OD_INTERCEPT, QUESTIONNAIRE_FILENAME, QUESTIONNAIRE_PATH,
             SAMPLING_PLAN_FILENAME, SAMPLING_PLAN_PATH,
@@ -281,7 +322,7 @@ def save_snapshot(project_id: str, body: dict) -> dict:
         )
         SELECT
             %s, %s, %s, %s,
-            %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
             %s, %s, %s,
             %s, %s, %s,
             %s, %s,
@@ -299,6 +340,7 @@ def save_snapshot(project_id: str, body: dict) -> dict:
             body.get("saved_by_user_id"),
             saved_by_name,
             body.get("project_name"),
+            body.get("project_list_name"),
             body.get("client_name"),
             body.get("location_city_county"),
             body.get("location_state"),

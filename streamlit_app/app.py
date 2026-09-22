@@ -13,7 +13,9 @@ from data import (
     create_project,
     file_download_url,
     find_or_create_language,
+    find_or_create_project,
     find_or_create_user,
+    project_list_name,
     get_snapshot,
     latest_snapshot,
     list_snapshots,
@@ -38,6 +40,15 @@ from form_logic import (
 
 st.set_page_config(page_title="Transit Survey Desk", layout="wide", initial_sidebar_state="collapsed")
 
+BRAND_MARK = """<div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="5.2" y="4.2" width="13.6" height="16.4" rx="2.3" stroke="currentColor" stroke-width="1.7"/>
+  <rect x="8.3" y="2.7" width="7.4" height="2.8" rx="1.1" fill="currentColor"/>
+  <path d="M8.4 10.2h5.4M8.4 13h4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="9.1" cy="16.8" r="1.15" fill="currentColor"/>
+  <circle cx="16.2" cy="16.8" r="1.15" fill="currentColor"/>
+  <path d="M9.1 16.8c2.2 0 3.6-2.6 7.1-2.6" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/>
+</svg></div>"""
+
 STYLE_PATH = Path(__file__).resolve().parent / "styles.css"
 YN_LABELS = {True: "Yes", False: "No", None: "Unset"}
 YN_VALUES = {"Yes": True, "No": False, "Unset": None}
@@ -53,6 +64,7 @@ SNAPSHOT_FILES = (
     ("Weekend questionnaire", "questionnaire_weekend_filename", "questionnaire_weekend_path"),
     ("Weekend sampling plan", "sampling_plan_weekend_filename", "sampling_plan_weekend_path"),
 )
+FILE_FIELD_KEYS = [key for pair in UPLOAD_FIELDS.values() for key in pair]
 
 
 def inject_css() -> None:
@@ -84,11 +96,18 @@ def init_state() -> None:
         "show_brief": False,
         "show_admin_login": False,
         "show_new_project": False,
+        "show_save_success": False,
+        "save_success_message": "",
         "bootstrapped": False,
         "lang_nonce": 0,
         "file_nonce": 0,
+        "stored_files": {},
         "saving": False,
         "pending_save": False,
+        "pending_form_reset": False,
+        "blank_entry": False,
+        "pending_project_select": "",
+        "pending_person_select": {},
         "actor_choice": "",
         "actor_other": "",
         "pm_choice": "",
@@ -96,6 +115,7 @@ def init_state() -> None:
         "fs_choice": "",
         "fs_other": "",
         "project_id": "",
+        "od_kit_choice": "Weekday",
         "toast": "",
     }
     for key, value in defaults.items():
@@ -126,8 +146,24 @@ def hydrate_yes_no(key: str, value) -> None:
         st.session_state[f"yn_{key}"] = None
 
 
+def apply_pending_person_select() -> None:
+    pending = st.session_state.pop("pending_person_select", None) or {}
+    for prefix, user_id in pending.items():
+        if not user_id:
+            continue
+        st.session_state[f"sel_{prefix}"] = user_id
+        st.session_state[f"{prefix}_choice"] = user_id
+        st.session_state[f"other_{prefix}"] = ""
+        st.session_state[f"{prefix}_other"] = ""
+
+
 def hydrate_person(prefix: str, name: str) -> None:
     matched = match_person_choice(name or "", st.session_state.users)
+    if matched["choice"] == "other" and matched["other"]:
+        created = find_or_create_user(matched["other"])
+        remember_user(created)
+        if created.get("id"):
+            matched = {"choice": created["id"], "other": ""}
     st.session_state[f"sel_{prefix}"] = matched["choice"]
     st.session_state[f"other_{prefix}"] = matched["other"]
     st.session_state[f"{prefix}_choice"] = matched["choice"]
@@ -162,8 +198,84 @@ def hydrate_form_widgets(form: dict) -> None:
     st.session_state.file_nonce += 1
 
 
-def apply_snapshot(snapshot: dict | None) -> None:
+def stored_files_from(source: dict | None) -> dict:
+    source = source or {}
+    return {key: source.get(key) or "" for key in FILE_FIELD_KEYS}
+
+
+def clear_form_file_fields(form: dict) -> None:
+    for key in FILE_FIELD_KEYS:
+        form[key] = ""
+
+
+def reset_upload_widgets() -> None:
+    st.session_state.file_nonce += 1
+    for kind in UPLOAD_FIELDS:
+        st.session_state.pop(f"processed_{kind}", None)
+
+
+def has_attached_file(name_key: str) -> bool:
+    form = st.session_state.form
+    stored = st.session_state.get("stored_files") or {}
+    return bool(form.get(name_key) or stored.get(name_key))
+
+
+def file_pair_for_save(name_key: str, path_key: str, enabled: bool) -> tuple[str | None, str | None]:
+    if not enabled:
+        return None, None
+    form = st.session_state.form
+    stored = st.session_state.get("stored_files") or {}
+    name = form.get(name_key) or stored.get(name_key) or None
+    path = form.get(path_key) or stored.get(path_key) or None
+    return name, path
+
+
+def form_for_status() -> dict:
+    form = dict(st.session_state.form)
+    stored = st.session_state.get("stored_files") or {}
+    for key in FILE_FIELD_KEYS:
+        form[key] = form.get(key) or stored.get(key) or ""
+    return form
+
+
+def reset_form_for_new_entry() -> None:
+    actor_sel = st.session_state.get("sel_actor") or st.session_state.get("actor_choice") or ""
+    actor_other = st.session_state.get("other_actor") or st.session_state.get("actor_other") or ""
+    project_id = st.session_state.get("project_id") or ""
+    w_project = st.session_state.get("w_project") or project_id
+    history = list(st.session_state.get("history") or [])
+    last_saved = st.session_state.get("last_saved")
+    st.session_state.viewing_snapshot = None
+    st.session_state.od_kit_choice = "Weekday"
+    apply_snapshot(None)
+    st.session_state.project_id = project_id
+    st.session_state.w_project = w_project
+    st.session_state.history = history
+    st.session_state.last_saved = last_saved
+    st.session_state.blank_entry = True
+    st.session_state.sel_actor = actor_sel
+    st.session_state.other_actor = actor_other
+    st.session_state.actor_choice = actor_sel
+    st.session_state.actor_other = actor_other
+    for prefix in ("pm", "fs"):
+        st.session_state[f"sel_{prefix}"] = ""
+        st.session_state[f"other_{prefix}"] = ""
+        st.session_state[f"{prefix}_choice"] = ""
+        st.session_state[f"{prefix}_other"] = ""
+    reset_upload_widgets()
+
+
+def apply_pending_form_reset() -> None:
+    if not st.session_state.pop("pending_form_reset", False):
+        return
+    reset_form_for_new_entry()
+
+
+def apply_snapshot(snapshot: dict | None, show_files: bool = False) -> None:
     form = snapshot_to_form(snapshot)
+    st.session_state.stored_files = stored_files_from(snapshot)
+    if not show_files:
+        clear_form_file_fields(form)
     st.session_state.form = form
     hydrate_form_widgets(form)
     st.session_state.pending_baseline = True
@@ -179,7 +291,32 @@ def remember_save(snapshot: dict | None) -> None:
     }
 
 
-def load_project(project_id: str) -> None:
+def remember_project(project: dict) -> None:
+    if not project.get("id"):
+        return
+    projects = list(st.session_state.projects or [])
+    if any(str(item.get("id")) == str(project["id"]) for item in projects):
+        return
+    projects.append(
+        {
+            "id": project["id"],
+            "name": project.get("name") or project.get("display_name") or "",
+            "display_name": project.get("display_name") or project.get("name") or "",
+            "is_active": True,
+        }
+    )
+    projects.sort(key=lambda item: (item.get("name") or item.get("display_name") or "").lower())
+    st.session_state.projects = projects
+
+
+def apply_pending_project_select() -> None:
+    pending = st.session_state.pop("pending_project_select", None)
+    if pending is None or pending == "":
+        return
+    st.session_state.w_project = pending
+
+
+def load_project(project_id: str, apply_latest: bool = True) -> None:
     st.session_state.project_id = project_id or ""
     st.session_state.viewing_snapshot = None
     st.session_state.notice = ""
@@ -193,14 +330,37 @@ def load_project(project_id: str) -> None:
         latest = latest_snapshot(project_id)
         versions = list_snapshots(project_id)
         st.session_state.history = versions
-        apply_snapshot(latest)
         remember_save(latest)
+        if apply_latest and latest:
+            apply_snapshot(latest)
+            st.session_state.blank_entry = False
+        else:
+            apply_snapshot(None)
     except Exception as exc:
         st.session_state.error = str(exc)
 
 
 def on_project_change() -> None:
-    load_project(st.session_state.get("w_project") or "")
+    choice = (st.session_state.get("w_project") or "").strip()
+    projects = active_items(st.session_state.projects)
+    known_ids = {str(item["id"]) for item in projects}
+    if not choice:
+        st.session_state.blank_entry = True
+        load_project("", apply_latest=False)
+        return
+    if choice in known_ids:
+        st.session_state.blank_entry = True
+        load_project(choice, apply_latest=False)
+        return
+    try:
+        project, existed = find_or_create_project(choice)
+        remember_project(project)
+        reload_lists()
+        st.session_state.pending_project_select = project["id"]
+        st.session_state.blank_entry = not existed
+        load_project(project["id"], apply_latest=existed)
+    except Exception as exc:
+        st.session_state.error = str(exc)
 
 
 def ensure_bootstrap() -> None:
@@ -252,8 +412,25 @@ def resolve_user(name: str) -> tuple[dict, bool]:
 
 
 def run_save() -> None:
-    with st.spinner("Saving…"):
-        save_form()
+    st.session_state.saving = True
+    st.session_state.error = ""
+    st.rerun()
+
+
+def complete_save() -> None:
+    try:
+        with st.spinner("Saving…"):
+            save_form()
+    finally:
+        st.session_state.saving = False
+    if not st.session_state.error:
+        form = st.session_state.form
+        message = st.session_state.get("save_success_message") or (
+            f"{(form.get('project_name') or form.get('project_list_name') or 'Project').strip()} saved successfully."
+        )
+        close_dialogs()
+        st.session_state.show_save_success = True
+        st.session_state.save_success_message = message
     st.rerun()
 
 
@@ -276,6 +453,7 @@ def actor_manager_supervisor() -> tuple[str, str, str]:
 
 
 def sync_text_fields(form: dict) -> None:
+    form["project_list_name"] = project_list_name(st.session_state.get("project_id") or "")
     form["project_name"] = st.session_state.get("w_project_name", form.get("project_name") or "")
     form["client_name"] = st.session_state.get("w_client_name", form.get("client_name") or "")
     form["location_city_county"] = st.session_state.get("w_city", form.get("location_city_county") or "")
@@ -315,7 +493,7 @@ def next_action(*, actor_name: str, project_id: str, form: dict, dirty: bool, re
         return "Next: choose a project. The latest save loads automatically."
     if form.get("od_intercept") is None:
         return "Next: set weekday O-D to Yes or No."
-    if form.get("od_intercept") is True and not form.get("questionnaire_filename"):
+    if form.get("od_intercept") is True and not has_attached_file("questionnaire_filename"):
         return "Weekday O-D is on — upload the questionnaire."
     if form.get("od_intercept_weekend") is None:
         return "Next: set weekend O-D to Yes or No."
@@ -349,23 +527,64 @@ def yes_no(label: str, key: str, disabled: bool = False):
     return st.session_state.form[key]
 
 
+def adopt_typed_person(prefix: str, users: list[dict]) -> None:
+    choice = (st.session_state.get(f"sel_{prefix}") or "").strip()
+    if not choice or choice == "other":
+        return
+    known_ids = {str(row.get("id")) for row in users}
+    if choice in known_ids:
+        return
+    try:
+        created = find_or_create_user(choice)
+        if not created.get("id"):
+            return
+        remember_user(created)
+        pending = dict(st.session_state.get("pending_person_select") or {})
+        pending[prefix] = created["id"]
+        st.session_state.pending_person_select = pending
+        st.session_state.error = ""
+    except Exception as exc:
+        st.session_state.error = str(exc)
+    st.rerun()
+
+
 def person_field(label: str, prefix: str, users: list[dict], *, required: bool = False, disabled: bool = False) -> None:
-    options = [("", "Select…")] + [(row["id"], row.get("display_name") or row.get("name")) for row in users] + [("other", "Other")]
+    if st.session_state.get(f"sel_{prefix}") == "other":
+        typed = (
+            st.session_state.get(f"other_{prefix}")
+            or st.session_state.get(f"{prefix}_other")
+            or ""
+        ).strip()
+        if typed:
+            created = find_or_create_user(typed)
+            remember_user(created)
+            if created.get("id"):
+                st.session_state[f"sel_{prefix}"] = created["id"]
+                st.session_state[f"{prefix}_choice"] = created["id"]
+        else:
+            st.session_state[f"sel_{prefix}"] = ""
+    users = active_items(st.session_state.users)
+    options = [("", "Select…")] + [(row["id"], row.get("display_name") or row.get("name")) for row in users]
     labels = {item[0]: item[1] for item in options}
     ids = [item[0] for item in options]
     heading = f"{label} *" if required else label
     if f"sel_{prefix}" not in st.session_state:
         st.session_state[f"sel_{prefix}"] = st.session_state.get(f"{prefix}_choice", "")
+    current = st.session_state.get(f"sel_{prefix}")
+    if current and current not in ids:
+        ids = ids + [current]
+        labels[current] = current
     st.selectbox(
         heading,
         ids,
         format_func=lambda item: labels.get(item, item or "Select…"),
         key=f"sel_{prefix}",
         disabled=disabled,
+        accept_new_options=True,
+        placeholder="Choose or type a name",
     )
-    if st.session_state.get(f"sel_{prefix}") == "other":
-        st.text_input("Type a name", key=f"other_{prefix}", disabled=disabled, placeholder="Full name")
-        st.caption("This name is added to the user list when you save.")
+    if not disabled:
+        adopt_typed_person(prefix, users)
 
 
 def file_href(path: str, filename: str) -> str:
@@ -594,6 +813,11 @@ def close_dialogs() -> None:
     st.session_state.show_new_project = False
     st.session_state.show_history = False
     st.session_state.show_brief = False
+    st.session_state.show_save_success = False
+
+
+def dismiss_save_success() -> None:
+    st.session_state.show_save_success = False
 
 
 def dismiss_admin_login() -> None:
@@ -663,12 +887,14 @@ def new_project_dialog() -> None:
         st.rerun()
     if created_click:
         try:
-            created = create_project(name or "")
+            project, existed = find_or_create_project(name or "")
             reload_lists()
-            st.session_state.w_project = created["id"]
+            st.session_state.pending_project_select = project["id"]
             st.session_state.show_new_project = False
-            load_project(created["id"])
-            st.session_state.notice = f"Created {created.get('name') or created.get('display_name')}."
+            st.session_state.blank_entry = not existed
+            load_project(project["id"], apply_latest=existed)
+            label = project.get("name") or project.get("display_name")
+            st.session_state.notice = f"{'Opened' if existed else 'Created'} {label}."
         except Exception as exc:
             st.session_state.error = str(exc)
         st.rerun()
@@ -695,12 +921,23 @@ def history_dialog() -> None:
         if st.button("Open this version", key=f"open_hist_{item['id']}"):
             try:
                 snapshot = get_snapshot(item["id"])
-                apply_snapshot(snapshot)
+                apply_snapshot(snapshot, show_files=True)
                 st.session_state.viewing_snapshot = snapshot
                 st.session_state.show_history = False
                 st.session_state.notice = ""
             except Exception as exc:
                 st.session_state.error = str(exc)
+            st.rerun()
+
+
+@st.dialog("Saved", on_dismiss=dismiss_save_success)
+def save_success_dialog() -> None:
+    message = st.session_state.get("save_success_message") or "Project saved successfully."
+    st.markdown(f"<p class='save-success-copy'>{html.escape(message)}</p>", unsafe_allow_html=True)
+    with st.container():
+        st.markdown('<div class="dialog-actions"></div>', unsafe_allow_html=True)
+        if st.button("OK", type="primary", width="stretch", key="save_success_ok"):
+            dismiss_save_success()
             st.rerun()
 
 
@@ -740,25 +977,22 @@ def save_form() -> None:
         supervisor, supervisor_new = resolve_user(supervisor_name)
         payload = {
             **form,
+            "project_list_name": project_list_name(project_id),
             "saved_by_user_id": actor["id"],
             "saved_by_name": actor["name"],
             "project_manager_name": manager["name"] or None,
             "field_supervisor_name": supervisor["name"] or None,
             "field_start_date": form.get("field_start_date") or None,
-            "questionnaire_filename": form.get("questionnaire_filename") or None if form.get("od_intercept") else None,
-            "questionnaire_path": form.get("questionnaire_path") or None if form.get("od_intercept") else None,
-            "sampling_plan_filename": form.get("sampling_plan_filename") or None if form.get("od_intercept") else None,
-            "sampling_plan_path": form.get("sampling_plan_path") or None if form.get("od_intercept") else None,
             "callback_languages": form.get("callback_languages") or [] if form.get("od_intercept") else [],
             "od_translation_languages": form.get("od_translation_languages") or [] if form.get("od_intercept") else [],
             "non_destination_place_type": form.get("non_destination_place_type") if form.get("od_intercept") else None,
             "extra_trips_survey": form.get("extra_trips_survey") if form.get("od_intercept") else None,
             "companion_survey": form.get("companion_survey") if form.get("od_intercept") else None,
             "tour_survey": form.get("tour_survey") if form.get("od_intercept") else None,
-            "questionnaire_weekend_filename": form.get("questionnaire_weekend_filename") or None if form.get("od_intercept_weekend") else None,
-            "questionnaire_weekend_path": form.get("questionnaire_weekend_path") or None if form.get("od_intercept_weekend") else None,
-            "sampling_plan_weekend_filename": form.get("sampling_plan_weekend_filename") or None if form.get("od_intercept_weekend") else None,
-            "sampling_plan_weekend_path": form.get("sampling_plan_weekend_path") or None if form.get("od_intercept_weekend") else None,
+            "questionnaire_weekend_filename": file_pair_for_save("questionnaire_weekend_filename", "questionnaire_weekend_path", bool(form.get("od_intercept_weekend")))[0],
+            "questionnaire_weekend_path": file_pair_for_save("questionnaire_weekend_filename", "questionnaire_weekend_path", bool(form.get("od_intercept_weekend")))[1],
+            "sampling_plan_weekend_filename": file_pair_for_save("sampling_plan_weekend_filename", "sampling_plan_weekend_path", bool(form.get("od_intercept_weekend")))[0],
+            "sampling_plan_weekend_path": file_pair_for_save("sampling_plan_weekend_filename", "sampling_plan_weekend_path", bool(form.get("od_intercept_weekend")))[1],
             "callback_languages_weekend": form.get("callback_languages_weekend") or [] if form.get("od_intercept_weekend") else [],
             "od_translation_languages_weekend": form.get("od_translation_languages_weekend") or [] if form.get("od_intercept_weekend") else [],
             "non_destination_place_type_weekend": form.get("non_destination_place_type_weekend") if form.get("od_intercept_weekend") else None,
@@ -774,23 +1008,19 @@ def save_form() -> None:
             remember_user(manager)
         if supervisor_new:
             remember_user(supervisor)
-        if actor["id"]:
-            st.session_state.sel_actor = actor["id"]
-        if manager["id"]:
-            st.session_state.sel_pm = manager["id"]
-        if supervisor["id"]:
-            st.session_state.sel_fs = supervisor["id"]
-        history = [saved] + [item for item in (st.session_state.history or []) if str(item.get("id")) != str(saved.get("id"))]
-        st.session_state.history = history
-        st.session_state.viewing_snapshot = None
+        name = (saved.get("project_name") or saved.get("project_list_name") or form.get("project_name") or "Project").strip()
+        st.session_state.save_success_message = f"{name} saved successfully."
+        st.session_state.notice = ""
+        st.session_state.toast = ""
+        st.session_state.history = [saved] + [
+            item for item in (st.session_state.history or []) if str(item.get("id")) != str(saved.get("id"))
+        ]
         remember_save(saved)
-        st.session_state.pending_baseline = True
-        st.session_state.notice = f"Saved {format_when(saved.get('saved_at'))}. Earlier answers were kept."
-        st.session_state.toast = st.session_state.notice
+        st.session_state.viewing_snapshot = None
+        st.session_state.pending_form_reset = True
     except Exception as exc:
         st.session_state.error = str(exc)
     finally:
-        st.session_state.saving = False
         st.session_state.pending_save = False
 
 
@@ -807,7 +1037,7 @@ def return_to_latest() -> None:
 def render_banners() -> None:
     if st.session_state.error:
         st.markdown(f"<div class='banner error'>{html.escape(st.session_state.error)}</div>", unsafe_allow_html=True)
-    if st.session_state.notice:
+    if st.session_state.notice and not st.session_state.get("show_save_success"):
         st.markdown(f"<div class='banner ok'>{html.escape(st.session_state.notice)}</div>", unsafe_allow_html=True)
     viewing = st.session_state.viewing_snapshot
     if viewing:
@@ -912,6 +1142,8 @@ def snapshot_detail_html(snapshot: dict) -> str:
         return f"<div><dt>{html.escape(label)}</dt><dd>{html.escape(value or '—')}</dd></div>"
 
     blocks = [
+        cell("Project list", snapshot.get("project_list_name") or project_list_name(str(snapshot.get("project_id") or "")) or ""),
+        cell("Project name", snapshot.get("project_name") or ""),
         cell("Client", snapshot.get("client_name") or ""),
         cell("City or county", snapshot.get("location_city_county") or ""),
         cell("State", snapshot.get("location_state") or ""),
@@ -948,14 +1180,10 @@ def snapshot_detail_html(snapshot: dict) -> str:
 
 
 def render_admin() -> None:
-    connected = st.session_state.connected
-    pill_class = "live" if connected else "down" if connected is False else "wait"
-    pill_text = "Snowflake live" if connected else "Offline" if connected is False else "Connecting"
     st.markdown(
         f"""
         <div class="brand-bar">
-          <div class="brand-mark"><div class="mark">TS</div><div><strong>Admin console</strong><span>Saved records and lists</span></div></div>
-          <span class="pill {pill_class}"><span class="status-dot {'ok' if connected else ''}"></span>{pill_text}</span>
+          <div class="brand-mark">{BRAND_MARK}<div><strong>Admin console</strong><span>Saved records and lists</span></div></div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -984,7 +1212,10 @@ def render_admin() -> None:
                 st.session_state.admin_snapshot = None
                 st.session_state.admin_versions = []
                 st.rerun()
-            st.markdown(f"## {html.escape(snapshot.get('project_name') or 'Untitled project')}")
+            list_title = snapshot.get("project_list_name") or project_list_name(str(snapshot.get("project_id") or "")) or "Untitled project"
+            setup_title = snapshot.get("project_name") or "—"
+            st.markdown(f"## {html.escape(list_title)}")
+            st.caption(f"Project name: {setup_title}")
             st.caption(f"Showing save from {format_when(snapshot.get('saved_at'))} by {snapshot.get('saved_by_name') or '—'}. Pick another version below to switch.")
             render_version_picker(
                 st.session_state.admin_versions or [],
@@ -1004,19 +1235,26 @@ def render_admin() -> None:
             if not records:
                 st.write("No projects yet.")
             for record in records:
-                title = record.get("project_name") or record.get("project_list_name") or "Untitled"
+                list_title = record.get("project_list_name") or "Untitled list"
+                setup_title = record.get("project_name") or "No project name yet"
                 place = ", ".join(item for item in [record.get("location_city_county"), record.get("location_state")] if item)
                 meta = f"{record.get('client_name') or 'No client yet'}" + (f" · {place}" if place else "")
                 versions = int(record.get("version_count") or 0)
                 st.markdown(
-                    f"<div class='record-card'><h3 class='serif'>{html.escape(title)}</h3><p>{html.escape(meta)}</p>"
+                    f"<div class='record-card'><p class='eyebrow'>Project list</p>"
+                    f"<h3 class='serif'>{html.escape(list_title)}</h3>"
+                    f"<p class='record-setup-name'>Project name: {html.escape(setup_title)}</p>"
+                    f"<p>{html.escape(meta)}</p>"
                     f"<p>{html.escape(format_when(record.get('saved_at')) or 'No saves yet')} · "
                     f"{html.escape(record.get('saved_by_name') or '—')} · {versions} version{'s' if versions != 1 else ''}</p></div>",
                     unsafe_allow_html=True,
                 )
                 if st.button("View", key=f"view_rec_{record['project_id']}", disabled=not record.get("snapshot_id")):
                     try:
-                        st.session_state.admin_snapshot = get_snapshot(record["snapshot_id"])
+                        snapshot = get_snapshot(record["snapshot_id"])
+                        if not snapshot.get("project_list_name"):
+                            snapshot["project_list_name"] = record.get("project_list_name") or project_list_name(record["project_id"])
+                        st.session_state.admin_snapshot = snapshot
                         st.session_state.admin_versions = list_snapshots(record["project_id"])
                         radio_key = f"admin_version_radio_{record['project_id']}"
                         if radio_key in st.session_state:
@@ -1031,6 +1269,7 @@ def render_admin() -> None:
 
 
 def render_form() -> None:
+    apply_pending_person_select()
     form = st.session_state.form
     users = active_items(st.session_state.users)
     projects = active_items(st.session_state.projects)
@@ -1043,7 +1282,7 @@ def render_form() -> None:
     fill = form_fill_percent(
         actor_name=actor_name,
         project_id=project_id,
-        form=form,
+        form=form_for_status(),
         manager_name=manager_name,
         supervisor_name=supervisor_name,
     )
@@ -1062,7 +1301,6 @@ def render_form() -> None:
         if last_saved
         else ""
     )
-    connected = st.session_state.connected
     hint = next_action(
         actor_name=actor_name,
         project_id=project_id,
@@ -1081,21 +1319,18 @@ def render_form() -> None:
     else:
         status, tone = "Not started", "wait"
 
-    pill_class = "live" if connected else "down" if connected is False else "wait"
-    pill_text = "Snowflake live" if connected else "Offline" if connected is False else "Connecting"
     st.markdown(
         f"""
         <div class="brand-bar">
-          <div class="brand-mark"><div class="mark">TS</div>
+          <div class="brand-mark">{BRAND_MARK}
           <div><strong>Transit Survey Desk</strong><span>Project startup form</span></div></div>
-          <span class="pill {pill_class}"><span class="status-dot {'ok' if connected else ''}"></span>{pill_text}</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
     with st.container():
         st.markdown('<div class="nav-actions"></div>', unsafe_allow_html=True)
-        admin_col, brief_col, hist_col, save_col = st.columns(4, gap="small", vertical_alignment="center", wrap=False)
+        admin_col, brief_col, hist_col = st.columns(3, gap="small", vertical_alignment="center", wrap=False)
         with admin_col:
             if st.button("Admin", key="nav_admin", width="stretch"):
                 open_admin()
@@ -1115,9 +1350,6 @@ def render_form() -> None:
                 except Exception as exc:
                     st.session_state.error = str(exc)
                     st.rerun()
-        with save_col:
-            if st.button("Save", type="primary", disabled=bool(block), key="save_top", width="stretch", help=block or "Writes a new Snowflake snapshot"):
-                run_save()
 
     st.markdown(
         f"""
@@ -1170,7 +1402,7 @@ def render_form() -> None:
         st.markdown("<div class='card-start'></div>", unsafe_allow_html=True)
         st.markdown("<p class='eyebrow'>Start here</p>", unsafe_allow_html=True)
         st.markdown("## Which project")
-        st.caption("Opening a project loads its latest snapshot. Required to save.")
+        st.caption("Select a list name to start a blank save. Type an existing name to open its last version.")
         ids = [""] + [item["id"] for item in projects]
         labels = {"": "Select a project…"}
         labels.update({item["id"]: item.get("name") or item.get("display_name") for item in projects})
@@ -1179,9 +1411,11 @@ def render_form() -> None:
         st.selectbox(
             "Project *",
             ids,
-            format_func=lambda item: labels.get(item, item),
+            format_func=lambda item: labels.get(item, item or "Select a project…"),
             key="w_project",
             on_change=on_project_change,
+            accept_new_options=True,
+            placeholder="Choose or type a project name",
         )
         st.markdown('<div class="save-color-btn"></div>', unsafe_allow_html=True)
         if st.button("New project", type="primary", key="open_new_project"):
@@ -1213,14 +1447,20 @@ def render_form() -> None:
         st.markdown("<div class='card-start'></div>", unsafe_allow_html=True)
         st.markdown("<div class='section-kicker'><span class='section-num'>3</span><p class='eyebrow'>Instruments</p></div>", unsafe_allow_html=True)
         st.markdown("## O-D intercept survey")
-        st.caption("Weekday and weekend kits are saved separately. Switch tabs to edit each one.")
+        st.caption("Weekday and weekend kits are saved separately. Switch to edit each one.")
         weekday_status = "On" if form.get("od_intercept") is True else "Off" if form.get("od_intercept") is False else "Unset"
         weekend_status = "On" if form.get("od_intercept_weekend") is True else "Off" if form.get("od_intercept_weekend") is False else "Unset"
-        weekday_tab, weekend_tab = st.tabs([f"Weekday · {weekday_status}", f"Weekend · {weekend_status}"])
-        with weekday_tab:
-            od_kit("weekday", "od_intercept", languages, read_only)
-        with weekend_tab:
+        kit = st.segmented_control(
+            "O-D kit",
+            ["Weekday", "Weekend"],
+            key="od_kit_choice",
+            label_visibility="collapsed",
+        )
+        st.caption(f"Weekday · {weekday_status}   ·   Weekend · {weekend_status}")
+        if (kit or "Weekday") == "Weekend":
             od_kit("weekend", "od_intercept_weekend", languages, read_only)
+        else:
+            od_kit("weekday", "od_intercept", languages, read_only)
 
     with st.container():
         st.markdown("<div class='card-start'></div>", unsafe_allow_html=True)
@@ -1253,7 +1493,7 @@ def render_form() -> None:
     fill = form_fill_percent(
         actor_name=actor_name,
         project_id=st.session_state.project_id,
-        form=form,
+        form=form_for_status(),
         manager_name=manager_name,
         supervisor_name=supervisor_name,
     )
@@ -1281,10 +1521,22 @@ def render_form() -> None:
                 unsafe_allow_html=True,
             )
         with dock_r:
-            if st.button("Save", type="primary", disabled=bool(block), width="stretch", key="save_bottom", help=block or "Writes a new Snowflake snapshot"):
+            saving = bool(st.session_state.saving)
+            if st.button(
+                "Saving…" if saving else "Save",
+                type="primary",
+                disabled=bool(block) or saving,
+                width="stretch",
+                key="save_bottom",
+                help="Saving…" if saving else (block or "Writes a new Snowflake snapshot"),
+            ):
                 run_save()
+        if st.session_state.saving:
+            complete_save()
 
-    if st.session_state.show_admin_login:
+    if st.session_state.show_save_success:
+        save_success_dialog()
+    elif st.session_state.show_admin_login:
         admin_login_dialog()
     elif st.session_state.show_new_project:
         new_project_dialog()
@@ -1297,7 +1549,7 @@ def render_form() -> None:
                 actor_name=actor_name,
                 manager_name=manager_name,
                 supervisor_name=supervisor_name,
-                form=form,
+                form=form_for_status(),
                 last_saved_label=last_saved_label,
             )
         )
@@ -1307,10 +1559,11 @@ def main() -> None:
     inject_css()
     init_state()
     ensure_bootstrap()
-    st.session_state.saving = False
+    apply_pending_form_reset()
+    apply_pending_project_select()
     st.session_state.pending_save = False
     toast = st.session_state.get("toast") or ""
-    if toast:
+    if toast and not st.session_state.get("show_save_success"):
         st.toast(toast)
         st.session_state.toast = ""
     if st.session_state.page == "admin" and st.session_state.admin_ok:

@@ -44,6 +44,7 @@ def row_to_snapshot(row: dict) -> dict:
         "saved_by_user_id": row.get("saved_by_user_id"),
         "saved_by_name": row.get("saved_by_name"),
         "project_name": row.get("project_name"),
+        "project_list_name": row.get("project_list_name"),
         "client_name": row.get("client_name"),
         "location_city_county": row.get("location_city_county"),
         "location_state": row.get("location_state"),
